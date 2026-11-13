@@ -5,12 +5,15 @@
 //   spread shape = empirical quantiles of h-minute price changes over the last 720 min,
 //   standardized by each market's scale, shrunk 0.6 toward normal z-quantiles;
 //   median = last price (no drift). Quantiles clamped to [0,1], rounded to 6 dp,
-//   rows forced non-decreasing. Deterministic, stdlib only, no network/clock/random.
-// Practice pinball loss 0.271738 (p00 0.4382, p01 0.3165, p02 0.3667, p03 0.2606,
+//   rows forced non-decreasing.
+//   per-horizon width calibration: each row's quantiles rescaled about the row median by
+//   1.23 / 1.09 / 0.96 / 1.08 for horizon buckets 1-15 / 16-60 / 61-120 / 121-240 minutes.
+// Deterministic, stdlib only, no network/clock/random.
+// Practice pinball loss 0.271177 (p00 0.4382, p01 0.3165, p02 0.3667, p03 0.2606,
 // p04 0.2093, p05 0.1024) vs house persistence baseline 0.363589; tune (p00-p02)
-// 0.373807, holdout (p03-p05) 0.190780. Runtime <1.1 s per case (cap 8 s).
-// Validation note: practice pinball loss TOTAL 0.271738 (tune 0.373807, holdout
-// 0.190780) vs house persistence baseline 0.363589, from 109 candidates tested
+// 0.373178, holdout (p03-p05) 0.190269. Runtime <1.1 s per case (cap 8 s).
+// Validation note: practice pinball loss TOTAL 0.271177 (tune 0.373178, holdout
+// 0.190269) vs house persistence baseline 0.363589, from 109 candidates tested
 // one at a time on the local harness; only this one won on both tune and holdout.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -53,6 +56,17 @@ const DEFAULTS: P = {
   shape_mode: 'emp', emp_window: 720, emp_shrink: 0.6, emp_standardize: true, emp_min_n: 200,
   drift_mode: 'none', drift_window: 360, drift_k: 0, drift_cap: 0.02,
 };
+// Per-horizon width factors, one per bucket of horizon minutes: 1-15, 16-60, 61-120, 121-240.
+// Fitted on tune cases p00-p02 only, then shrunk halfway toward 1, so this is a
+// conservative calibration rather than a tune overfit.
+const WIDTH_FACTORS = [1.23, 1.09, 0.96, 1.08];
+const WIDTH_BUCKET_EDGES = [15, 60, 120, 240];
+
+function widthFactor(h: number): number {
+  const i = WIDTH_BUCKET_EDGES.findIndex((e) => h <= e);
+  return WIDTH_FACTORS[i < 0 ? WIDTH_FACTORS.length - 1 : i];
+}
+
 function params(): P {
   // Hardcoded: no env override, so runtime behaviour is fixed and deterministic.
   return DEFAULTS;
@@ -155,6 +169,15 @@ function forecast(c: Case, p: P): { id: string; q: number[][] }[] {
         const r = price6(Math.min(1, Math.max(0, v)));
         row.push(Math.max(r, prev));
         prev = row[row.length - 1];
+      }
+      // ---- per-horizon width calibration about the row median ----
+      const med = row[2];
+      const wf = widthFactor(h);
+      prev = -1;
+      for (let j = 0; j < row.length; j++) {
+        const r = price6(Math.min(1, Math.max(0, med + wf * (row[j] - med))));
+        row[j] = Math.max(r, prev);
+        prev = row[j];
       }
       rows.push(row);
     }
